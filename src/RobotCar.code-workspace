@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../RobotCar"
+		},
+		{
+			"name": "Line_Follower",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

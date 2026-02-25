@@ -4,249 +4,316 @@
 
 BluetoothSerial SerialBT;
 
-// ======================== PIN DEFINITIONS ========================
-// Motor driver pins (H-Bridge inputs)
+// ======================== PINS ========================
 #define M1A 18
 #define M1B 19
 #define M2A 22
 #define M2B 23
 
 #define NUM_SENSORS 8
-
-// ======================== PWM CONFIGURATION ========================
-// Using ESP32 LEDC hardware PWM for motor speed control
-int PWM_FREQ = 10000;       // 10kHz PWM
-int PWM_RESOLUTION = 8;     // 8-bit resolution (0–255)
-
-int CH_M1A = 0;
-int CH_M1B = 1;
-int CH_M2A = 2;
-int CH_M2B = 3;
-
-int baseSpeed = 100; // Maximum PWM value for full speed
-
-float Kp = 0.02;  // Proportional gain for line following control
-int lineLostThreshold = 400;  // Threshold for considering the line lost (sum of sensor values)
-
-bool estopLatched = false; // Emergency stop latch 
-bool wasConnected = false;  // Track Bluetooth connection state
-
-int rightTrim = -10;  // Trim value to adjust for any bias in the motors (positive means right motor is faster, negative means left motor is faster)
-int leftTrim  = 0;  // Left motor is baseline, right motor is adjusted by rightTrim. Adjust these values to achieve straight movement when both motors are given the same command.
-
-enum State {
-  WAITING_FOR_CONNECTION,
-  RUNNING,
-  ESTOPPED
-};
-
-/*
-  Processed drive intent.
-*/
-struct DriveCommand {
-  int throttle;
-  int steering;
-  int left;
-  int right;
-};
-
-DriveCommand driveCommand;
-
-/*
-  Final PWM output for one motor.
-*/
-struct MotorOut {
-  int pwmA;
-  int pwmB;
-};
-
-enum StopMode {
-  COAST,   // Motor free-spins when stopped
-  BRAKE    // Motor actively brakes when stopped
-};
-
-MotorOut leftMotor;
-MotorOut rightMotor;
-
-// Final confirmed left-to-right order
-uint8_t sensorPins[NUM_SENSORS] = {
-  25, 26, 27, 14, 4, 16, 17, 5
-};
+uint8_t sensorPins[NUM_SENSORS] = {25, 26, 27, 14, 4, 16, 17, 5};
 
 QTRSensors qtr;
 uint16_t values[NUM_SENSORS];
 
-MotorOut mapMotorDir(int cmd, bool forwardIsA, StopMode stop) {
+// ======================== PWM ========================
+const int PWM_FREQ       = 10000;
+const int PWM_RESOLUTION = 8;
+const int CH_M1A = 0, CH_M1B = 1, CH_M2A = 2, CH_M2B = 3;
+
+// ======================== TUNING ========================
+// Bluetooth commands:
+//   P<val>   Kp              e.g. P0.018
+//   D<val>   Kd              e.g. D1.500
+//   B<val>   baseSpeed       e.g. B55
+//   DB<val>  deadband        e.g. DB150
+//   PT<val>  pivotMs         e.g. PT350
+//   PB<val>  postBumpMs      e.g. PB150
+//   PW<val>  pivotPwm        e.g. PW90
+//   FW<val>  bumpPwm         e.g. FW65
+//   CC<val>  cornerCount     e.g. CC5
+//   CT<val>  cornerThreshold e.g. CT700
+//   AL<val>  alpha 0.0-1.0   e.g. AL0.40
+//   V        print all values
+
+float Kp              = 0.018f;
+float Kd              = 1.500f;
+int   baseSpeed       = 55;
+int   deadband        = 150;
+
+int   pivotMs         = 350;
+int   postBumpMs      = 150;
+int   pivotPwm        = 90;    // One wheel forward at this, other wheel backward at this
+int   bumpPwm         = 65;
+int   cornerCount     = 5;
+int   cornerThreshold = 700;
+
+float alpha = 0.40f;
+
+int leftTrim  = 0;
+int rightTrim = -10;
+
+// ======================== STATE MACHINE ========================
+enum RobotState : uint8_t { DISARMED, FOLLOW, PIVOT, BUMP };
+RobotState robotState = DISARMED;
+unsigned long stateStartMs = 0;
+
+bool   armed        = false;
+String rxBuf        = "";
+
+int   lastError     = 0;
+float filteredSteer = 0.0f;
+int   lastErrorSign = 0;
+int   cornerDir     = 1;
+
+unsigned long lastBtPrintMs = 0;
+
+// ======================== HELPERS ========================
+static inline int clampInt(int v, int lo, int hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
+static inline void changeState(RobotState s) {
+  robotState   = s;
+  stateStartMs = millis();
+}
+
+int countBlack(uint16_t* vals) {
+  int n = 0;
+  for (int i = 0; i < NUM_SENSORS; i++)
+    if ((int)vals[i] > cornerThreshold) n++;
+  return n;
+}
+
+// ======================== MOTOR HELPERS ========================
+struct MotorOut { int pwmA, pwmB; };
+
+// Full bidirectional — positive = forward, negative = reverse
+MotorOut mapMotorDir(int cmd, bool forwardIsA) {
   MotorOut m;
-
-  int magnitude = abs(cmd);
-  if (magnitude > 255) magnitude = 255;
-
-  // Which pin means "forward" for THIS motor?
-  // If forwardIsA=true: forward=A, reverse=B
-  // If forwardIsA=false: forward=B, reverse=A
-  int forwardPin = forwardIsA ? 0 : 1; // 0 => A, 1 => B
-  int reversePin = forwardIsA ? 1 : 0;
-
+  int mag = clampInt(abs(cmd), 0, 255);
   if (cmd > 0) {
-    // forward
-    m.pwmA = (forwardPin == 0) ? magnitude : 0;
-    m.pwmB = (forwardPin == 1) ? magnitude : 0;
+    m.pwmA = forwardIsA ? mag : 0;
+    m.pwmB = forwardIsA ? 0   : mag;
   } else if (cmd < 0) {
-    // reverse
-    m.pwmA = (reversePin == 0) ? magnitude : 0;
-    m.pwmB = (reversePin == 1) ? magnitude : 0;
+    m.pwmA = forwardIsA ? 0   : mag;
+    m.pwmB = forwardIsA ? mag : 0;
   } else {
-    // stop
-    if (stop == COAST) {
-      m.pwmA = 0;
-      m.pwmB = 0;
-    } else { // BRAKE
-      m.pwmA = 255;
-      m.pwmB = 255;
-    }
+    m.pwmA = m.pwmB = 0;
   }
-
   return m;
 }
 
-void computeDriveCommand(int error) {
-  driveCommand.throttle = baseSpeed;  // Constant forward throttle
-  driveCommand.steering = Kp * error;
-
-  driveCommand.left = driveCommand.throttle + driveCommand.steering;
-  driveCommand.right = driveCommand.throttle - driveCommand.steering;
-
-  driveCommand.left  += leftTrim;
-  driveCommand.right += rightTrim;
-
-  driveCommand.left  = constrain(driveCommand.left,  -255, 255);
-  driveCommand.right = constrain(driveCommand.right, -255, 255);
-}
-
-void writeMotorOutputs(const MotorOut left, const MotorOut right) {
-
-  // M1 = RIGHT motor
-  ledcWrite(CH_M1A, right.pwmA);
+void writeMotors(MotorOut left, MotorOut right) {
+  ledcWrite(CH_M1A, right.pwmA);  // M1 = RIGHT
   ledcWrite(CH_M1B, right.pwmB);
-
-  // M2 = LEFT motor
-  ledcWrite(CH_M2A, left.pwmA);
+  ledcWrite(CH_M2A, left.pwmA);   // M2 = LEFT
   ledcWrite(CH_M2B, left.pwmB);
 }
 
-int sensorSum(const uint16_t v[], int n) {
-  long sum = 0;
-  for (int i = 0; i < n; i++) sum += v[i];
-  return (int)sum;
+void stopMotors() {
+  MotorOut z = {0, 0};
+  writeMotors(z, z);
 }
 
-void handleStopCommands() {
+// Follow: clamp to 0..255 — no reverse during line following
+void setFollowSpeeds(int leftSpd, int rightSpd) {
+  leftSpd  = clampInt(leftSpd,  0, 255);
+  rightSpd = clampInt(rightSpd, 0, 255);
+  writeMotors(
+    mapMotorDir(leftSpd,  false),
+    mapMotorDir(rightSpd, true)
+  );
+}
+
+// True in-place pivot: one wheel forward, opposite wheel backward
+// dir=+1 → turn right: left forward, right backward
+// dir=-1 → turn left:  right forward, left backward
+void doPivotMotors(int dir) {
+  int leftCmd  =  dir * pivotPwm;   // +dir = forward for left
+  int rightCmd = -dir * pivotPwm;   // -dir = backward for right
+  writeMotors(
+    mapMotorDir(leftCmd,  false),
+    mapMotorDir(rightCmd, true)
+  );
+}
+
+void driveForward(int spd) {
+  setFollowSpeeds(spd, spd);
+}
+
+// ======================== BLUETOOTH ========================
+void btPrint(const String& s) { SerialBT.println(s); }
+
+void printVars() {
+  btPrint(
+    "Kp="  + String(Kp, 4)     +
+    " Kd=" + String(Kd, 4)     +
+    " B="  + String(baseSpeed)  +
+    " DB=" + String(deadband)   +
+    " AL=" + String(alpha, 3)   +
+    " PT=" + String(pivotMs)    +
+    " PB=" + String(postBumpMs) +
+    " PW=" + String(pivotPwm)   +
+    " FW=" + String(bumpPwm)    +
+    " CC=" + String(cornerCount) +
+    " CT=" + String(cornerThreshold)
+  );
+}
+
+void handleCommand(String s) {
+  s.trim();
+  if (s.length() == 0) return;
+
+  if (s == "A") { armed = true;  stopMotors(); changeState(FOLLOW);   btPrint("ARMED");   return; }
+  if (s == "S") { armed = false; stopMotors(); changeState(DISARMED); btPrint("STOPPED"); return; }
+  if (s == "V") { printVars(); return; }
+
+  if (s.startsWith("DB")) { deadband        = s.substring(2).toInt();   btPrint("DB=" + String(deadband));        return; }
+  if (s.startsWith("PT")) { pivotMs         = s.substring(2).toInt();   btPrint("PT=" + String(pivotMs));         return; }
+  if (s.startsWith("PB")) { postBumpMs      = s.substring(2).toInt();   btPrint("PB=" + String(postBumpMs));      return; }
+  if (s.startsWith("PW")) { pivotPwm        = s.substring(2).toInt();   btPrint("PW=" + String(pivotPwm));        return; }
+  if (s.startsWith("FW")) { bumpPwm         = s.substring(2).toInt();   btPrint("FW=" + String(bumpPwm));         return; }
+  if (s.startsWith("CC")) { cornerCount     = s.substring(2).toInt();   btPrint("CC=" + String(cornerCount));     return; }
+  if (s.startsWith("CT")) { cornerThreshold = s.substring(2).toInt();   btPrint("CT=" + String(cornerThreshold)); return; }
+  if (s.startsWith("AL")) { alpha           = s.substring(2).toFloat(); btPrint("AL=" + String(alpha, 3));        return; }
+
+  char   cmd = s.charAt(0);
+  String val = s.substring(1);
+  switch (cmd) {
+    case 'P': Kp        = val.toFloat(); btPrint("Kp="   + String(Kp, 4));    break;
+    case 'D': Kd        = val.toFloat(); btPrint("Kd="   + String(Kd, 4));    break;
+    case 'B': baseSpeed = val.toInt();   btPrint("base=" + String(baseSpeed)); break;
+    default:  btPrint("ERR: unknown cmd"); break;
+  }
+}
+
+void pollBluetooth() {
   while (SerialBT.available()) {
     char c = (char)SerialBT.read();
-
-    if (c == 'S' || c == 's') estopLatched = true;   // STOP
-    if (c == 'R' || c == 'r') estopLatched = false;  // RESUME
+    if (c == '\n' || c == '\r') {
+      if (rxBuf.length() > 0) { handleCommand(rxBuf); rxBuf = ""; }
+    } else {
+      if (rxBuf.length() < 64) rxBuf += c;
+    }
   }
 }
 
+// ======================== SETUP ========================
 void setup() {
-  SerialBT.begin("ESP32_LineFollower"); // Bluetooth device name
-  delay(1000);
-
-  Serial.println("\n=== QTR CALIBRATION ===");
-
-  qtr.setTypeRC();
-  qtr.setSensorPins(sensorPins, NUM_SENSORS);
-  qtr.setTimeout(5000);
-
-  Serial.println("Calibrating for 3 seconds...");
-  Serial.println("Move the robot slowly across BLACK and WHITE.");
-
-  delay(1000);
-
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  for (int i = 0; i < 200; i++) {
-    qtr.calibrate();
-    delay(15);
-  }
-
+  pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
-  pinMode(M1A, OUTPUT);
-  pinMode(M1B, OUTPUT);
-  pinMode(M2A, OUTPUT);
-  pinMode(M2B, OUTPUT);
+  ledcSetup(CH_M1A, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(M1A, CH_M1A);
+  ledcSetup(CH_M1B, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(M1B, CH_M1B);
+  ledcSetup(CH_M2A, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(M2A, CH_M2A);
+  ledcSetup(CH_M2B, PWM_FREQ, PWM_RESOLUTION); ledcAttachPin(M2B, CH_M2B);
+  stopMotors();
 
-  ledcSetup(CH_M1A, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(CH_M1B, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(CH_M2A, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(CH_M2B, PWM_FREQ, PWM_RESOLUTION);
+  SerialBT.begin("ESP32_PD");
+  qtr.setTypeRC();
+  qtr.setSensorPins(sensorPins, NUM_SENSORS);
+  qtr.setTimeout(2500);
 
-  ledcAttachPin(M1A, CH_M1A);
-  ledcAttachPin(M1B, CH_M1B);
-  ledcAttachPin(M2A, CH_M2A);
-  ledcAttachPin(M2B, CH_M2B);
+  digitalWrite(LED_BUILTIN, HIGH);
+  btPrint("CALIBRATING...");
 
-  Serial.println("Calibration complete.\n");
+  unsigned long start = millis();
+  while (millis() - start < 4000) qtr.calibrate();
+
+  digitalWrite(LED_BUILTIN, LOW);
+  btPrint("DONE. Send A to arm.");
+  changeState(DISARMED);
 }
 
+// ======================== LOOP ========================
 void loop() {
+  pollBluetooth();
 
-  bool connected = SerialBT.hasClient();
-
-  if (!connected && wasConnected) {
-    estopLatched = true; // Latch estop if connection is lost
-  }
-
-  wasConnected = connected;
-
-  if (!SerialBT.hasClient()) {
-    // No Bluetooth connection, stop motors and wait
-    writeMotorOutputs(mapMotorDir(0, false, COAST), mapMotorDir(0, true , COAST));
+  if (!armed || robotState == DISARMED) {
+    stopMotors();
+    delay(5);
     return;
   }
 
-  handleStopCommands();
+  unsigned long now     = millis();
+  unsigned long elapsed = now - stateStartMs;
 
-  if (estopLatched) {
-    writeMotorOutputs(mapMotorDir(0, false, COAST), mapMotorDir(0, true , COAST));
-    return;
-  }
-
-  qtr.readCalibrated(values);
-  uint16_t position = qtr.readLineBlack(values);
-
-  int sum = sensorSum(values, NUM_SENSORS);
-
-  static unsigned long last = 0;
-  if (millis() - last > 200) {
-    last = millis();
-    SerialBT.print("sum="); SerialBT.print(sum);
-    SerialBT.print(" pos="); SerialBT.print(position);
-    SerialBT.print(" vals=");
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      SerialBT.print(values[i]);
-      SerialBT.print(i == NUM_SENSORS - 1 ? "" : ",");
+  // ----------------------------------------------------------------
+  // STATE: PIVOT — true in-place spin (one fwd, one rev)
+  // ----------------------------------------------------------------
+  if (robotState == PIVOT) {
+    doPivotMotors(cornerDir);
+    if (elapsed >= (unsigned long)pivotMs) {
+      btPrint("PIVOT DONE");
+      changeState(BUMP);
     }
-  SerialBT.println();
-}
-
-  if (sum < lineLostThreshold) {
-    // stop motors (coast)
-    leftMotor  = mapMotorDir(0,  /*forwardIsA=*/false, COAST); // LEFT forward is B
-    rightMotor = mapMotorDir(0, /*forwardIsA=*/true,  COAST); // RIGHT forward is A
-    writeMotorOutputs(leftMotor, rightMotor);
-    return; // skip rest of loop
+    return;
   }
 
-  int error = position - 3500;
+  // ----------------------------------------------------------------
+  // STATE: BUMP — short forward nudge to land on the new line
+  // ----------------------------------------------------------------
+  if (robotState == BUMP) {
+    driveForward(bumpPwm);
+    if (elapsed >= (unsigned long)postBumpMs) {
+      lastError     = 0;
+      filteredSteer = 0.0f;
+      btPrint("RESUMING");
+      changeState(FOLLOW);
+    }
+    return;
+  }
 
-  computeDriveCommand(error);
-  leftMotor  = mapMotorDir(driveCommand.left,  /*forwardIsA=*/false, BRAKE); // LEFT forward is B
-  rightMotor = mapMotorDir(driveCommand.right, /*forwardIsA=*/true,  BRAKE); // RIGHT forward is A
+  // ----------------------------------------------------------------
+  // STATE: FOLLOW
+  // ----------------------------------------------------------------
+  int position = (int)qtr.readLineBlack(values);
+  int error    = position - 3500;
+  int bc       = countBlack(values);
 
-  
-  writeMotorOutputs(leftMotor, rightMotor);
+  // Track approach direction (ignore noise near centre)
+  if (error < -200)     lastErrorSign = -1;
+  else if (error > 200) lastErrorSign = +1;
+
+  // Corner detection
+  if (bc >= cornerCount) {
+    cornerDir = lastErrorSign;
+    if (cornerDir == 0) cornerDir = 1;
+    btPrint("CORNER dir=" + String(cornerDir) + " bc=" + String(bc));
+    changeState(PIVOT);
+    return;
+  }
+
+  // Deadband — within ±deadband treat error as zero, motors run equal speed
+  int effectiveError = (abs(error) <= deadband) ? 0 : error;
+
+  // PD
+  int   derivative = effectiveError - lastError;
+  lastError = effectiveError;
+
+  float rawSteer = (Kp * (float)effectiveError) + (Kd * (float)derivative);
+
+  filteredSteer = alpha * rawSteer + (1.0f - alpha) * filteredSteer;
+
+  float steer = filteredSteer;
+  if (steer >  200.0f) steer =  200.0f;
+  if (steer < -200.0f) steer = -200.0f;
+
+  // Clamp to 0 minimum — line following never reverses, just slows
+  int leftSpd  = clampInt((int)((float)baseSpeed + steer) + leftTrim,  0, 255);
+  int rightSpd = clampInt((int)((float)baseSpeed - steer) + rightTrim, 0, 255);
+
+  setFollowSpeeds(leftSpd, rightSpd);
+
+  // BT debug every 200ms
+  if (now - lastBtPrintMs > 200UL) {
+    lastBtPrintMs = now;
+    btPrint("e=" + String(error) + " s=" + String(steer, 1) +
+            " L=" + String(leftSpd) + " R=" + String(rightSpd));
+  }
+
+  delay(10);
 }

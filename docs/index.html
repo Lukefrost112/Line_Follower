@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ESP32 Line Follower Robot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #080c10;
+      --surface:  #0d1117;
+      --border:   #1c2a3a;
+      --accent:   #00e5ff;
+      --accent2:  #00ff9d;
+      --text:     #c9d8e8;
+      --muted:    #4a6070;
+      --mono:     'Share Tech Mono', monospace;
+      --sans:     'Syne', sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      overflow-x: hidden;
+    }
+
+    /* ── NOISE OVERLAY ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.4;
+    }
+
+    /* ── GRID BG ── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.3;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2.5rem;
+      background: rgba(8,12,16,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-logo {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.85rem;
+      letter-spacing: 0.1em;
+    }
+
+    .nav-links { display: flex; gap: 2rem; }
+    .nav-links a {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-decoration: none;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--accent); }
+
+    /* ── SECTIONS ── */
+    section {
+      position: relative;
+      z-index: 1;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 5rem 2rem;
+    }
+
+    /* ── HERO ── */
+    #hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding-top: 8rem;
+    }
+
+    .hero-tag {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--accent);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: fadeUp 0.6s 0.1s forwards;
+    }
+
+    h1 {
+      font-size: clamp(2.8rem, 7vw, 5.5rem);
+      font-weight: 800;
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+      color: #fff;
+      opacity: 0;
+      animation: fadeUp 0.7s 0.2s forwards;
+    }
+
+    h1 span { color: var(--accent); }
+
+    .hero-sub {
+      margin-top: 1.5rem;
+      font-size: 1.1rem;
+      color: var(--muted);
+      max-width: 560px;
+      line-height: 1.7;
+      opacity: 0;
+      animation: fadeUp 0.7s 0.35s forwards;
+    }
+
+    .hero-btns {
+      margin-top: 2.5rem;
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      opacity: 0;
+      animation: fadeUp 0.7s 0.5s forwards;
+    }
+
+    .btn {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 0.75rem 1.75rem;
+      border-radius: 3px;
+      text-decoration: none;
+      transition: all 0.2s;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #080c10;
+      border: 1px solid var(--accent);
+      font-weight: 700;
+    }
+    .btn-primary:hover { background: transparent; color: var(--accent); }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── SCAN LINE HERO VISUAL ── */
+    .hero-visual {
+      margin-top: 4rem;
+      position: relative;
+      height: 180px;
+      opacity: 0;
+      animation: fadeUp 0.8s 0.65s forwards;
+    }
+
+    .sensor-bar {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      height: 100%;
+    }
+
+    .sensor-bar .bar {
+      flex: 1;
+      border-radius: 2px 2px 0 0;
+      background: var(--border);
+      animation: pulse 2s ease-in-out infinite;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .sensor-bar .bar::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to top, var(--accent), transparent);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .sensor-bar .bar.active::after { opacity: 1; }
+
+    .bar:nth-child(1) { height: 20%; animation-delay: 0.0s; }
+    .bar:nth-child(2) { height: 30%; animation-delay: 0.1s; }
+    .bar:nth-child(3) { height: 45%; animation-delay: 0.2s; }
+    .bar:nth-child(4) { height: 90%; animation-delay: 0.3s; animation-duration: 1.5s; }
+    .bar:nth-child(5) { height: 95%; animation-delay: 0.35s; animation-duration: 1.5s; }
+    .bar:nth-child(6) { height: 50%; animation-delay: 0.4s; }
+    .bar:nth-child(7) { height: 28%; animation-delay: 0.5s; }
+    .bar:nth-child(8) { height: 15%; animation-delay: 0.6s; }
+
+    .bar:nth-child(4), .bar:nth-child(5) { background: var(--accent); }
+
+    .sensor-label {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── SECTION HEADINGS ── */
+    .section-tag {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--accent2);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      margin-bottom: 0.75rem;
+    }
+
+    h2 {
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -0.02em;
+      margin-bottom: 3rem;
+    }
+
+    /* ── STATE MACHINE ── */
+    .states {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 3rem;
+    }
+
+    .state-card {
+      background: var(--surface);
+      padding: 1.75rem 1.5rem;
+      transition: background 0.2s;
+    }
+    .state-card:hover { background: #111820; }
+
+    .state-name {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--accent);
+      letter-spacing: 0.15em;
+      margin-bottom: 0.5rem;
+    }
+
+    .state-desc {
+      font-size: 0.9rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .state-arrow {
+      text-align: center;
+      color: var(--border);
+      font-size: 1.5rem;
+      padding: 0 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ── FORMULA BLOCK ── */
+    .formula-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+    }
+
+    .formula-block code {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      color: var(--accent2);
+      display: block;
+      line-height: 2;
+    }
+
+    .formula-block .comment {
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    /* ── TUNING TABLE ── */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+
+    thead tr {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 1rem 1.25rem;
+      text-align: left;
+    }
+
+    td {
+      padding: 0.85rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(0,229,255,0.03); }
+
+    td:first-child {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.85rem;
+    }
+
+    /* ── HARDWARE GRID ── */
+    .hw-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+
+    .hw-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1.5rem;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .hw-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+    .hw-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .hw-title {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--accent2);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 0.4rem;
+    }
+
+    .hw-desc {
+      font-size: 0.875rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* ── TUNING STEPS ── */
+    .steps { display: flex; flex-direction: column; gap: 1rem; }
+
+    .step {
+      display: flex;
+      gap: 1.25rem;
+      align-items: flex-start;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1.25rem 1.5rem;
+      transition: border-color 0.2s;
+    }
+    .step:hover { border-color: var(--accent2); }
+
+    .step-num {
+      font-family: var(--mono);
+      font-size: 1.1rem;
+      color: var(--accent);
+      min-width: 2rem;
+      font-weight: 700;
+    }
+
+    .step-text {
+      font-size: 0.9rem;
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .step-text strong { color: var(--accent2); }
+
+    /* ── PHOTO PLACEHOLDER ── */
+    .photo-placeholder {
+      border: 2px dashed var(--border);
+      border-radius: 6px;
+      height: 280px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      margin-bottom: 3rem;
+      transition: border-color 0.2s;
+    }
+    .photo-placeholder:hover { border-color: var(--accent); }
+    .photo-placeholder .ph-icon { font-size: 2.5rem; opacity: 0.3; }
+
+    /* ── FOOTER ── */
+    footer {
+      position: relative;
+      z-index: 1;
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+    }
+
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── DIVIDER ── */
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0;
+    }
+
+    /* ── ANIMATIONS ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.6; }
+    }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 600px) {
+      nav { padding: 1rem 1.25rem; }
+      .nav-links { gap: 1.25rem; }
+      section { padding: 4rem 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav>
+    <span class="nav-logo">// ESP32_LINE_FOLLOWER</span>
+    <div class="nav-links">
+      <a href="#overview">Overview</a>
+      <a href="#control">Control</a>
+      <a href="#tuning">Tuning</a>
+      <a href="#hardware">Hardware</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section id="hero">
+    <p class="hero-tag">// Autonomous Robotics Project</p>
+    <h1>ESP32<br/><span>Line Follower</span><br/>Robot</h1>
+    <p class="hero-sub">
+      PD-controlled autonomous robot with real-time Bluetooth tuning,
+      automatic corner detection, and in-place pivot turning.
+      Built on the ESP32 with a QTR-8RC infrared sensor array.
+    </p>
+    <div class="hero-btns">
+      <a href="https://github.com/Lukefrost112/Line_Follower" class="btn btn-primary">GitHub Repo →</a>
+      <a href="#overview" class="btn btn-secondary">Learn More</a>
+    </div>
+
+    <div class="hero-visual">
+      <div class="sensor-bar">
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar active"></div>
+        <div class="bar active"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+      </div>
+      <p class="sensor-label">// 8-channel IR sensor array — live position reading</p>
+    </div>
+  </section>
+
+  <hr class="divider"/>
+
+  <!-- OVERVIEW -->
+  <section id="overview">
+    <p class="section-tag">// 01 — Overview</p>
+    <h2>How It Works</h2>
+
+    <div class="photo-placeholder">
+      <span class="ph-icon">📷</span>
+      <span>ADD ROBOT PHOTO HERE</span>
+    </div>
+
+    <p class="section-tag">// State Machine</p>
+    <div class="states">
+      <div class="state-card">
+        <div class="state-name">DISARMED</div>
+        <div class="state-desc">Motors stopped. Waiting for Bluetooth arm command.</div>
+      </div>
+      <div class="state-card">
+        <div class="state-name">FOLLOW</div>
+        <div class="state-desc">Active PD line following. Reads sensor position every 10ms.</div>
+      </div>
+      <div class="state-card">
+        <div class="state-name">PIVOT</div>
+        <div class="state-desc">Corner detected. Outer wheel drives, inner stops — arcs into turn.</div>
+      </div>
+      <div class="state-card">
+        <div class="state-name">BUMP</div>
+        <div class="state-desc">Short forward nudge after pivot to relocate the line.</div>
+      </div>
+    </div>
+
+    <p style="color:var(--muted); font-size:0.9rem; line-height:1.7;">
+      A corner is detected when <strong style="color:var(--accent2)">5 or more</strong> of the 8 sensors simultaneously see black.
+      The robot remembers which side the line was approaching from during the run-up,
+      and pivots toward that side — no guesswork at the intersection.
+    </p>
+  </section>
+
+  <hr class="divider"/>
+
+  <!-- CONTROL -->
+  <section id="control">
+    <p class="section-tag">// 02 — Control System</p>
+    <h2>PD Algorithm</h2>
+
+    <div class="formula-block">
+      <code>position  = qtr.readLineBlack()  <span class="comment">// 0 to 7000, center = 3500</span></code>
+      <code>error     = position - 3500</code>
+      <code>&nbsp;</code>
+      <code>steer     = (Kp × error) + (Kd × (error - lastError))</code>
+      <code>filtered  = α × steer + (1 - α) × filtered  <span class="comment">// low-pass</span></code>
+      <code>&nbsp;</code>
+      <code>if abs(error) ≤ deadband → steer = 0  <span class="comment">// no twitch zone</span></code>
+      <code>&nbsp;</code>
+      <code>leftSpeed  = baseSpeed + filtered</code>
+      <code>rightSpeed = baseSpeed - filtered</code>
+    </div>
+
+    <p style="color:var(--muted); font-size:0.9rem; line-height:1.8; max-width:680px;">
+      <strong style="color:var(--text)">Kp</strong> corrects based on how far off-centre the robot is.
+      <strong style="color:var(--text)">Kd</strong> counteracts the correction before it overshoots — this is what stops oscillation.
+      The <strong style="color:var(--text)">low-pass filter</strong> (α) blends each new output with the previous one to kill sensor noise spikes.
+      The <strong style="color:var(--text)">deadband</strong> makes the robot ignore tiny errors near centre so it drives straight without twitching.
+      Neither motor ever reverses during following — the slower motor simply slows toward zero.
+    </p>
+  </section>
+
+  <hr class="divider"/>
+
+  <!-- TUNING -->
+  <section id="tuning">
+    <p class="section-tag">// 03 — Bluetooth Tuning</p>
+    <h2>Live Parameters</h2>
+
+    <div class="table-wrap" style="margin-bottom:3rem;">
+      <table>
+        <thead>
+          <tr>
+            <th>Command</th>
+            <th>Parameter</th>
+            <th>Default</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>P&lt;val&gt;</td><td>Proportional gain Kp</td><td>0.018</td><td>Raise until oscillation, back off 30%</td></tr>
+          <tr><td>D&lt;val&gt;</td><td>Derivative gain Kd</td><td>1.500</td><td>Raise until straights stop oscillating</td></tr>
+          <tr><td>B&lt;val&gt;</td><td>Base speed</td><td>55</td><td>Start low, raise once stable</td></tr>
+          <tr><td>DB&lt;val&gt;</td><td>Deadband</td><td>150</td><td>Raise if twitching when centred</td></tr>
+          <tr><td>AL&lt;val&gt;</td><td>Filter alpha</td><td>0.40</td><td>Lower = smoother, higher = faster response</td></tr>
+          <tr><td>PT&lt;val&gt;</td><td>Pivot duration (ms)</td><td>350</td><td>Tune in 25ms steps for ~90°</td></tr>
+          <tr><td>PW&lt;val&gt;</td><td>Pivot motor speed</td><td>110</td><td>Higher = tighter arc</td></tr>
+          <tr><td>PB&lt;val&gt;</td><td>Post-pivot bump (ms)</td><td>150</td><td>Raise if stops before finding line</td></tr>
+          <tr><td>FW&lt;val&gt;</td><td>Bump forward speed</td><td>65</td><td>—</td></tr>
+          <tr><td>CC&lt;val&gt;</td><td>Corner sensor count</td><td>5</td><td>Lower = triggers earlier</td></tr>
+          <tr><td>CT&lt;val&gt;</td><td>Corner black threshold</td><td>700</td><td>—</td></tr>
+          <tr><td>A</td><td>Arm robot</td><td>—</td><td>Starts following</td></tr>
+          <tr><td>S</td><td>Stop / disarm</td><td>—</td><td>Stops motors</td></tr>
+          <tr><td>V</td><td>Print all values</td><td>—</td><td>Verify current settings</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="section-tag">// Tuning Order</p>
+    <div class="steps">
+      <div class="step">
+        <span class="step-num">01</span>
+        <span class="step-text">Set <strong>D0</strong>. Raise <strong>Kp</strong> until the robot oscillates on a straight, then send a value ~30% lower.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">02</span>
+        <span class="step-text">Raise <strong>Kd</strong> until straight-line oscillation stops. Kd is typically 50–80× your Kp value.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">03</span>
+        <span class="step-text">If still twitching when centred, raise <strong>DB</strong> in steps of 25 (e.g. <strong>DB175</strong>, <strong>DB200</strong>).</span>
+      </div>
+      <div class="step">
+        <span class="step-num">04</span>
+        <span class="step-text">Adjust <strong>AL</strong> — lower for smoother straights, higher if curves feel sluggish.</span>
+      </div>
+      <div class="step">
+        <span class="step-num">05</span>
+        <span class="step-text">Tune <strong>PT</strong> in 25ms steps until corners reliably turn ~90°. Raise <strong>PW</strong> for a tighter arc.</span>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider"/>
+
+  <!-- HARDWARE -->
+  <section id="hardware">
+    <p class="section-tag">// 04 — Hardware</p>
+    <h2>Components & Wiring</h2>
+
+    <div class="hw-grid" style="margin-bottom:3rem;">
+      <div class="hw-card">
+        <div class="hw-icon">🧠</div>
+        <div class="hw-title">ESP32 Dev Board</div>
+        <div class="hw-desc">Dual-core 240MHz MCU with built-in Bluetooth. Runs Arduino core.</div>
+      </div>
+      <div class="hw-card">
+        <div class="hw-icon">👁️</div>
+        <div class="hw-title">QTR-8RC Sensor</div>
+        <div class="hw-desc">8-channel infrared reflectance array. GPIO 25, 26, 27, 14, 4, 16, 17, 5.</div>
+      </div>
+      <div class="hw-card">
+        <div class="hw-icon">⚙️</div>
+        <div class="hw-title">Dual DC Motors</div>
+        <div class="hw-desc">Left motor on GPIO 22/23. Right motor on GPIO 18/19. PWM via LEDC.</div>
+      </div>
+      <div class="hw-card">
+        <div class="hw-icon">🔋</div>
+        <div class="hw-title">LiPo Battery</div>
+        <div class="hw-desc">Powers ESP32 and motor driver. Size depends on chassis.</div>
+      </div>
+    </div>
+
+    <div class="photo-placeholder">
+      <span class="ph-icon">🔌</span>
+      <span>ADD WIRING DIAGRAM HERE</span>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer>
+    <p>
+      ESP32 Line Follower &nbsp;·&nbsp;
+      Built with <a href="https://github.com/espressif/arduino-esp32">ESP32 Arduino Core</a> &amp;
+      <a href="https://github.com/pololu/qtr-sensors-arduino">QTRSensors</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/Lukefrost112/Line_Follower">View on GitHub</a>
+    </p>
+  </footer>
+
+  <script>
+    // Animate sensor bars to simulate live reading
+    const bars = document.querySelectorAll('.sensor-bar .bar');
+    const patterns = [
+      [0,0,0,1,1,0,0,0],
+      [0,0,1,1,0,0,0,0],
+      [0,0,0,0,1,1,0,0],
+      [0,0,0,1,1,0,0,0],
+    ];
+    let p = 0;
+    setInterval(() => {
+      p = (p + 1) % patterns.length;
+      bars.forEach((b, i) => {
+        b.classList.toggle('active', patterns[p][i] === 1);
+      });
+    }, 900);
+  </script>
+
+</body>
+</html>

@@ -143,10 +143,3 @@ Follow this order for best results:
 ## License
 
 MIT License — free to use, modify, and distribute.
-
----
-
-## Demo
-
-> 📸 *Add photo here*
-> 🎥 *Add video link here*

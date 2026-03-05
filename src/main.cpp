@@ -36,17 +36,17 @@ const int CH_M1A = 0, CH_M1B = 1, CH_M2A = 2, CH_M2B = 3;
 //   AL<val>  alpha 0.0-1.0   e.g. AL0.40
 //   V        print all values
 
-float Kp              = 0.018f;
-float Kd              = 1.500f;
-int   baseSpeed       = 55;
-int   deadband        = 150;
+float Kp              = 0.0390f;
+float Kd              = 0.760f;
+int   baseSpeed       = 127;
+int   deadband        = 250;
 
-int   pivotMs         = 350;
+int   pivotMs         = 320;
 int   postBumpMs      = 150;
-int   pivotPwm        = 90;    // One wheel forward at this, other wheel backward at this
+int   pivotPwm        = 120;    // One wheel forward at this, other wheel backward at this
 int   bumpPwm         = 65;
 int   cornerCount     = 5;
-int   cornerThreshold = 700;
+int   cornerThreshold = 500;
 
 float alpha = 0.40f;
 
@@ -65,6 +65,7 @@ int   lastError     = 0;
 float filteredSteer = 0.0f;
 int   lastErrorSign = 0;
 int   cornerDir     = 1;
+unsigned long lastLoopMs = 0;
 
 unsigned long lastBtPrintMs = 0;
 
@@ -271,7 +272,17 @@ void loop() {
   // STATE: FOLLOW
   // ----------------------------------------------------------------
   int position = (int)qtr.readLineBlack(values);
-  int error    = position - 3500;
+  long num = 0, den = 0;
+  int pos[NUM_SENSORS] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};
+  qtr.read(values);
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    int w = (i == 0 || i == NUM_SENSORS-1) ? 2 : 1;  // Give outer sensors more weight
+    num += (long) pos[i] * values[i] * w;
+    den += (long) values[i] * w;
+  }
+
+  int error = (den > 0) ? (num / den) : lastError;
+
   int bc       = countBlack(values);
 
   // Track approach direction (ignore noise near centre)
@@ -279,19 +290,27 @@ void loop() {
   else if (error > 200) lastErrorSign = +1;
 
   // Corner detection
-  if (bc >= cornerCount) {
-    cornerDir = lastErrorSign;
-    if (cornerDir == 0) cornerDir = 1;
-    btPrint("CORNER dir=" + String(cornerDir) + " bc=" + String(bc));
-    changeState(PIVOT);
-    return;
+  static int cornerFrames = 0;
+
+  if (bc >= cornerCount && (values[0] > cornerThreshold || values[NUM_SENSORS-1] > cornerThreshold)) {
+      cornerFrames++;
+      if (cornerFrames >= 3) {
+          cornerFrames = 0;
+          cornerDir = lastErrorSign;
+          if (cornerDir == 0) cornerDir = 1;
+          btPrint("CORNER dir=" + String(cornerDir) + " bc=" + String(bc));
+          changeState(PIVOT);
+          return;
+      }
+  } else {
+      cornerFrames = 0;  // reset if condition breaks
   }
 
   // Deadband — within ±deadband treat error as zero, motors run equal speed
   int effectiveError = (abs(error) <= deadband) ? 0 : error;
 
-  // PD
-  int   derivative = effectiveError - lastError;
+  // PD control
+  int derivative = effectiveError - lastError;
   lastError = effectiveError;
 
   float rawSteer = (Kp * (float)effectiveError) + (Kd * (float)derivative);
@@ -309,11 +328,10 @@ void loop() {
   setFollowSpeeds(leftSpd, rightSpd);
 
   // BT debug every 200ms
-  if (now - lastBtPrintMs > 200UL) {
+  /*if (now - lastBtPrintMs > 200UL) {
     lastBtPrintMs = now;
     btPrint("e=" + String(error) + " s=" + String(steer, 1) +
             " L=" + String(leftSpd) + " R=" + String(rightSpd));
   }
-
-  delay(10);
+            */
 }

@@ -34,6 +34,8 @@ const int CH_M1A = 0, CH_M1B = 1, CH_M2A = 2, CH_M2B = 3;
 //   CC<val>  cornerCount     e.g. CC5
 //   CT<val>  cornerThreshold e.g. CT700
 //   AL<val>  alpha 0.0-1.0   e.g. AL0.40
+//   LT<val>  leftTrim        e.g. LT-10
+//   RT<val>  rightTrim       e.g. RT+10
 //   V        print all values
 
 float Kp              = 0.0390f;
@@ -46,12 +48,12 @@ int   postBumpMs      = 150;
 int   pivotPwm        = 120;    // One wheel forward at this, other wheel backward at this
 int   bumpPwm         = 65;
 int   cornerCount     = 5;
-int   cornerThreshold = 500;
+int   cornerThreshold = 1500;
 
 float alpha = 0.40f;
 
 int leftTrim  = 0;
-int rightTrim = -10;
+int rightTrim = 0;
 
 // ======================== STATE MACHINE ========================
 enum RobotState : uint8_t { DISARMED, FOLLOW, PIVOT, BUMP };
@@ -121,8 +123,8 @@ void stopMotors() {
 
 // Follow: clamp to 0..255 — no reverse during line following
 void setFollowSpeeds(int leftSpd, int rightSpd) {
-  leftSpd  = clampInt(leftSpd,  0, 255);
-  rightSpd = clampInt(rightSpd, 0, 255);
+  leftSpd  = clampInt(leftSpd,  -80, 255);
+  rightSpd = clampInt(rightSpd, -80, 255);
   writeMotors(
     mapMotorDir(leftSpd,  false),
     mapMotorDir(rightSpd, true)
@@ -160,7 +162,9 @@ void printVars() {
     " PW=" + String(pivotPwm)   +
     " FW=" + String(bumpPwm)    +
     " CC=" + String(cornerCount) +
-    " CT=" + String(cornerThreshold)
+    " CT=" + String(cornerThreshold) +
+    " LT=" + String(leftTrim) +
+    " RT=" + String(rightTrim)
   );
 }
 
@@ -180,6 +184,8 @@ void handleCommand(String s) {
   if (s.startsWith("CC")) { cornerCount     = s.substring(2).toInt();   btPrint("CC=" + String(cornerCount));     return; }
   if (s.startsWith("CT")) { cornerThreshold = s.substring(2).toInt();   btPrint("CT=" + String(cornerThreshold)); return; }
   if (s.startsWith("AL")) { alpha           = s.substring(2).toFloat(); btPrint("AL=" + String(alpha, 3));        return; }
+  if (s.startsWith("LT")) { leftTrim        = s.substring(2).toInt();   btPrint("LT=" + String(leftTrim));        return; }
+  if (s.startsWith("RT")) { rightTrim       = s.substring(2).toInt();   btPrint("RT=" + String(rightTrim));       return; }
 
   char   cmd = s.charAt(0);
   String val = s.substring(1);
@@ -222,7 +228,7 @@ void setup() {
   btPrint("CALIBRATING...");
 
   unsigned long start = millis();
-  while (millis() - start < 4000) qtr.calibrate();
+  while (millis() - start < 8000) qtr.calibrate();
 
   digitalWrite(LED_BUILTIN, LOW);
   btPrint("DONE. Send A to arm.");
@@ -294,7 +300,7 @@ void loop() {
 
   if (bc >= cornerCount && (values[0] > cornerThreshold || values[NUM_SENSORS-1] > cornerThreshold)) {
       cornerFrames++;
-      if (cornerFrames >= 3) {
+      if (cornerFrames >= 2) {
           cornerFrames = 0;
           cornerDir = lastErrorSign;
           if (cornerDir == 0) cornerDir = 1;
@@ -328,10 +334,14 @@ void loop() {
   setFollowSpeeds(leftSpd, rightSpd);
 
   // BT debug every 200ms
-  /*if (now - lastBtPrintMs > 200UL) {
+if (now - lastBtPrintMs > 200UL) {
     lastBtPrintMs = now;
-    btPrint("e=" + String(error) + " s=" + String(steer, 1) +
-            " L=" + String(leftSpd) + " R=" + String(rightSpd));
+    btPrint(String(values[0]) + "," + String(values[1]) + "," + String(values[2]) + "," + String(values[3]) + "," +
+            String(values[4]) + "," + String(values[5]) + "," + String(values[6]) + "," + String(values[7]) +
+            "  pos=" + String(position) +
+            "  err=" + String(error) +
+            "  spd=" + String(leftSpd) + "," + String(rightSpd)
+    );
   }
-            */
+            
 }
